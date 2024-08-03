@@ -5,22 +5,44 @@ const logger = require('./logger');
 
 const JUPITER_API_BASE_URL = process.env.JUPITER_API_BASE_URL || 'https://quote-api.jup.ag/v6';
 
-async function getQuote(tokenA, tokenB, amount, slippageBps) {
-  const quoteUrl = `${JUPITER_API_BASE_URL}/quote?inputMint=${tokenB}&outputMint=${tokenA}&amount=${amount}&slippageBps=${slippageBps}`;
+function isValidSolanaAddress(address) {
+  // Simple validation check for Solana addresses (32 characters and base58)
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
+}
+
+async function isTokenTradable(tokenAddress) {
+  const url = `${JUPITER_API_BASE_URL}/tokens`;
+  try {
+    const response = await axios.get(url);
+    const tradableTokens = response.data;
+    return tradableTokens.some(token => token.address === tokenAddress);
+  } catch (error) {
+    logger.error(`Failed to check if token is tradable: ${error.message}`);
+    return false;
+  }
+}
+
+async function getQuote(buyTokenAddress, sellTokenAddress, amount, slippageBps) {
+  if (!isValidSolanaAddress(buyTokenAddress) || !isValidSolanaAddress(sellTokenAddress)) {
+    throw new Error(`Invalid Solana address. Buy: ${buyTokenAddress}, Sell: ${sellTokenAddress}`);
+  }
+
+  const quoteUrl = `${JUPITER_API_BASE_URL}/quote?inputMint=${sellTokenAddress}&outputMint=${buyTokenAddress}&amount=${amount}&slippageBps=${slippageBps}`;
   logger.info(`Quote URL: ${quoteUrl}`);
 
   try {
     const response = await axios.get(quoteUrl);
     const quoteData = response.data;
 
-    if (quoteData.errorCode === 'TOKEN_NOT_TRADABLE' || quoteData.errorCode === 'COULD_NOT_FIND_ANY_ROUTE') {
-      logger.error(`Error: ${quoteData.error}`);
-      throw new Error(quoteData.error);
+    if (quoteData.errorCode) {
+      logger.error(`Quote API error: ${quoteData.errorCode}, Message: ${quoteData.message}`);
+      throw new Error(quoteData.message);
     }
 
     return quoteData;
   } catch (error) {
-    throw new Error(`Failed to get quote: ${error.message}`);
+    logger.error(`Quote API request failed: ${error.response ? JSON.stringify(error.response.data) : JSON.stringify(error.message)}`);
+    throw new Error(`Failed to get quote: ${error.response ? JSON.stringify(error.response.data) : JSON.stringify(error.message)}`);
   }
 }
 
@@ -70,11 +92,13 @@ async function sendAndConfirmTransaction(swapTransaction) {
   }
 
   logger.info(`Transaction successful: https://solscan.io/tx/${txid}`);
+  return { txid, confirmation };
 }
 
-async function swapTokens(tokenA, tokenB, amount = 10000, slippageBps = 150) {
+async function swapTokens(buyTokenAddress, sellTokenAddress, amount = 10000, slippageBps = 150) {
+  let success = false;
   try {
-    const quoteData = await getQuote(tokenA, tokenB, amount, slippageBps);
+    const quoteData = await getQuote(buyTokenAddress, sellTokenAddress, amount, slippageBps);
     logger.info(`Quote Data: ${JSON.stringify(quoteData, null, 2)}`);
 
     const swapTransaction = await getSwapTransaction(quoteData);
@@ -83,10 +107,11 @@ async function swapTokens(tokenA, tokenB, amount = 10000, slippageBps = 150) {
     const { txid, confirmation } = await sendAndConfirmTransaction(swapTransaction);
     logger.info(`Transaction ID: ${txid}`);
     logger.info(`Confirmation: ${JSON.stringify(confirmation, null, 2)}`);
+    success = true;
   } catch (error) {
-    logger.error(`Swap failed: ${error.message}`);
-    throw error;
+    logger.error(`Swap failed: ${JSON.stringify(error.message)}`);
   }
+  return success;
 }
 
-module.exports = { swapTokens };
+module.exports = { swapTokens, isTokenTradable };

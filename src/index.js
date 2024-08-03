@@ -1,16 +1,9 @@
 require('dotenv').config();
 const { getPoolAddresses } = require('./bitquery');
-const { swapTokens } = require('./swap');
-const { walletPublicKey } = require('./wallet');
-const winston = require('winston');
-
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.json(),
-  transports: [
-    new winston.transports.Console({ format: winston.format.simple() })
-  ]
-});
+const { swapTokens, isTokenTradable } = require('./swap');
+const logger = require('./logger');
+const config = require("./config");
+const { sleep } = require("./util");
 
 async function main() {
   logger.info('Starting main function...');
@@ -24,26 +17,37 @@ async function main() {
     logger.info(`Attempt ${attempts}/${maxRetries} to find a valid token pair...`);
 
     try {
-      const { tokenA, tokenB } = await getPoolAddresses();
+      const buyAddresses = await getPoolAddresses();
 
-      logger.info(`Token A: ${tokenA}`);
-      logger.info(`Token B: ${tokenB}`);
-      logger.info(`Wallet Public Key: ${walletPublicKey.toBase58()}`);
+      for (const buyToken of buyAddresses) {
+        logger.info(`Checking if Buy Token is tradable: ${buyToken.address}`);
+        const isTradable = await isTokenTradable(buyToken.address);
 
-      if (tokenA && tokenB) {
-        await swapTokens(tokenA, tokenB, 10000, 150); // Amount and slippage are parameters now
-        logger.info('Swap successful!');
-        success = true;
-      } else {
-        logger.warn('Invalid token pair, retrying...');
+        if (!isTradable) {
+          logger.warn(`Token not tradable: ${buyToken.address}`);
+          continue;
+        }
+
+        logger.info(`Attempting to swap with Buy Token: ${buyToken.address}`);
+        success = await swapTokens(buyToken.address, config.SOLANA.ADDRESS, 10000, 150);
+        await sleep(1.5);
+        if (success) {
+          logger.info('Swap successful!');
+          break;
+        }
       }
     } catch (error) {
       logger.error(`Error during attempt ${attempts}: ${error.message}`);
     }
+
+    if (!success && attempts < maxRetries) {
+      logger.info('Retrying...');
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for 5 seconds before retrying
+    }
   }
 
   if (!success) {
-    logger.error('Max retries reached. Could not find a valid token pair to swap.');
+    logger.error('Failed to complete the swap after maximum retries.');
   }
 }
 
